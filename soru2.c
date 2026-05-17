@@ -2,13 +2,14 @@
  * Soru 2: fork() + sinyal yönetimi
  *
  * Senaryo:
- *   - Ebeveyn, bir alt süreç (child) oluşturur.
+ *   - Ebeveyn bir alt süreç (child) oluşturur.
  *   - Child: sonsuz döngüde "Calisiyor..." yazdırır.
- *   - Ebeveyn: alarm(3) ile her 3 saniyede bir SIGALRM alır.
- *     1. SIGALRM → child'a SIGSTOP  (durdur)
- *     2. SIGALRM → child'a SIGCONT  (devam ettir)
- *     3. SIGALRM → child'a SIGSTOP  (tekrar durdur)
- *   - ~10 saniye sonra ebeveyn child'a SIGCONT + SIGINT gönderir ve bekler.
+ *   - Ebeveyn: alarm(3) ile 3 saniyede bir SIGALRM alır.
+ *       SIGALRM #1 (3. sn)  → child'a SIGSTOP
+ *       SIGALRM #2 (6. sn)  → child'a SIGCONT
+ *       SIGALRM #3 (9. sn)  → child'a SIGSTOP
+ *       SIGALRM #4 (10. sn) → child'a SIGCONT + SIGINT  (~10 saniye)
+ *   - Ebeveyn waitpid() ile child'ın bitmesini bekler.
  *
  * Öğrenci: Ahmet Can Alpay  |  b251210350
  */
@@ -66,29 +67,44 @@ static void run_child(void)
 /* ------------------------------------------------------------------ */
 
 static pid_t child_pid;
-static int   durduruldu  = 0;
-static int   alarm_sayaci = 0;
+static volatile sig_atomic_t bitmeli = 0;
+static int alarm_sayaci = 0;
 
 static void parent_alarm_handler(int sig)
 {
     (void)sig;
     alarm_sayaci++;
 
-    if (!durduruldu) {
-        printf("[Parent] SIGALRM #%d -> child'a SIGSTOP\n", alarm_sayaci);
+    switch (alarm_sayaci) {
+    case 1:                         /* 3. saniye: durdur */
+        printf("[Parent] SIGALRM #1 -> child'a SIGSTOP\n");
         fflush(stdout);
         kill(child_pid, SIGSTOP);
-        durduruldu = 1;
-    } else {
-        printf("[Parent] SIGALRM #%d -> child'a SIGCONT\n", alarm_sayaci);
+        alarm(3);
+        break;
+
+    case 2:                         /* 6. saniye: devam ettir */
+        printf("[Parent] SIGALRM #2 -> child'a SIGCONT\n");
         fflush(stdout);
         kill(child_pid, SIGCONT);
-        durduruldu = 0;
-    }
-
-    /* 10 saniye içinde toplam 3 alarm: saniye 3, 6, 9 */
-    if (alarm_sayaci < 3)
         alarm(3);
+        break;
+
+    case 3:                         /* 9. saniye: tekrar durdur */
+        printf("[Parent] SIGALRM #3 -> child'a SIGSTOP\n");
+        fflush(stdout);
+        kill(child_pid, SIGSTOP);
+        alarm(1);                   /* 1 saniye sonra SIGINT gönder */
+        break;
+
+    case 4:                         /* ~10. saniye: sonlandır */
+        printf("[Parent] ~10 saniye doldu, child'a SIGINT gonderiliyor.\n");
+        fflush(stdout);
+        kill(child_pid, SIGCONT);   /* duruyorsa uyandır */
+        kill(child_pid, SIGINT);
+        bitmeli = 1;                /* ana döngüyü bitir */
+        break;
+    }
 }
 
 int main(void)
@@ -99,38 +115,24 @@ int main(void)
         return 1;
     }
 
-    if (child_pid == 0) {
+    if (child_pid == 0)
         run_child();
-    }
 
     /* ---- EBEVEYN ---- */
     printf("[Parent %d] Child PID = %d\n", getpid(), child_pid);
     fflush(stdout);
 
-    /* sigaction ile kalıcı handler kur (signal() _POSIX modunda handler'ı sıfırlar) */
     struct sigaction sa;
     sa.sa_handler = parent_alarm_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;   /* SA_RESTART YOK: sleep() sinyal gelince kesilsin */
+    sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, NULL);
 
     alarm(3);   /* ilk zamanlayıcı */
 
-    /* sleep() sinyal gelince kesilir ve kalan süreyi döndürür;
-     * döngü ile toplam 10 saniye uyku sağlanır */
-    unsigned int kalan = 10;
-    while (kalan > 0)
-        kalan = sleep(kalan);
-
-    alarm(0);   /* varsa bekleyen alarmı iptal et */
-
-    printf("[Parent] ~10 saniye doldu, child'a SIGINT gonderiliyor.\n");
-    fflush(stdout);
-
-    /* Durdurulmuşsa önce uyandır, sonra sonlandır */
-    if (durduruldu)
-        kill(child_pid, SIGCONT);
-    kill(child_pid, SIGINT);
+    /* SIGINT, bitmeli bayrağı 1 olana kadar bekle */
+    while (!bitmeli)
+        pause();
 
     int durum;
     waitpid(child_pid, &durum, 0);

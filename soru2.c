@@ -1,11 +1,8 @@
 /*
  * Soru 2: fork() + sinyal yönetimi
  *
- * Akış:
- *   3. sn  → Ebeveyn: SIGSTOP  (Çocuk durduruluyor)
- *   6. sn  → Ebeveyn: SIGCONT  (Çocuk devam ediyor)
- *   9. sn  → Ebeveyn: SIGSTOP  (tekrar durdur)
- *   10. sn → Ebeveyn: SIGCONT + SIGINT  (~10 sn sonunda sonlandır)
+ * Her SIGALRM'da: child SIGSTOP → 2 sn bekle → child SIGCONT
+ * ~10 saniye sonra child'a SIGINT gönderilir.
  *
  * Öğrenci: Ahmet Can Alpay  |  b251210350
  */
@@ -26,6 +23,7 @@
 static void child_sigint_handler(int sig)
 {
     (void)sig;
+    signal(SIGINT, child_sigint_handler); /* handler'ı yeniden kur */
     printf("Çocuk: SIGINT alındı ancak devam ediliyor...\n");
     fflush(stdout);
     exit(0);
@@ -34,21 +32,15 @@ static void child_sigint_handler(int sig)
 static void child_sigcont_handler(int sig)
 {
     (void)sig;
+    signal(SIGCONT, child_sigcont_handler);
     printf("Çocuk: İşlem yeniden başlatıldı\n");
     fflush(stdout);
 }
 
 static void run_child(void)
 {
-    struct sigaction sa;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    sa.sa_handler = child_sigint_handler;
-    sigaction(SIGINT, &sa, NULL);
-
-    sa.sa_handler = child_sigcont_handler;
-    sigaction(SIGCONT, &sa, NULL);
+    signal(SIGINT,  child_sigint_handler);
+    signal(SIGCONT, child_sigcont_handler);
 
     int sayac = 0;
     while (1) {
@@ -69,41 +61,28 @@ static int alarm_sayaci = 0;
 static void parent_alarm_handler(int sig)
 {
     (void)sig;
+    signal(SIGALRM, parent_alarm_handler); /* handler'ı yeniden kur */
     alarm_sayaci++;
 
-    switch (alarm_sayaci) {
-    case 1:                             /* 3. saniye: durdur */
-        printf("Ebeveyn: Çocuk durduruluyor...\n");
-        fflush(stdout);
-        kill(child_pid, SIGSTOP);
-        alarm(3);
-        break;
+    /* Her alarm döngüsünde: durdur → 2 sn bekle → devam ettir */
+    printf("Ebeveyn: Çocuk durduruluyor...\n");
+    fflush(stdout);
+    kill(child_pid, SIGSTOP);
 
-    case 2:                             /* 6. saniye: devam ettir */
-        printf("Ebeveyn: Çocuk devam ediyor...\n");
-        fflush(stdout);
-        kill(child_pid, SIGCONT);
-        alarm(3);
-        break;
+    sleep(2);
 
-    case 3:                             /* 9. saniye: tekrar durdur */
-        printf("Ebeveyn: Çocuk durduruluyor...\n");
-        fflush(stdout);
-        kill(child_pid, SIGSTOP);
-        alarm(1);
-        break;
+    printf("Ebeveyn: Çocuk devam ediyor...\n");
+    fflush(stdout);
+    kill(child_pid, SIGCONT);
 
-    case 4:                             /* ~10. saniye: devam ettir + sonlandır */
-        printf("Ebeveyn: Çocuk devam ediyor...\n");
-        fflush(stdout);
-        kill(child_pid, SIGCONT);
-
+    if (alarm_sayaci < 2) {
+        alarm(3); /* bir sonraki döngü */
+    } else {
+        /* ~10 saniye doldu (3+2+3+2 = 10 sn) */
         printf("Ebeveyn: SIGINT gönderiliyor...\n");
         fflush(stdout);
         kill(child_pid, SIGINT);
-
         bitmeli = 1;
-        break;
     }
 }
 
@@ -119,13 +98,8 @@ int main(void)
         run_child();
 
     /* ---- EBEVEYN ---- */
-    struct sigaction sa;
-    sa.sa_handler = parent_alarm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGALRM, &sa, NULL);
-
-    alarm(3);
+    signal(SIGALRM, parent_alarm_handler);
+    alarm(3); /* ilk zamanlayıcı */
 
     while (!bitmeli)
         pause();
